@@ -1,0 +1,169 @@
+# Data Quality Rules — executed by src/quality/dq_framework.py (Phase 2)
+#
+# severity:
+#   critical  → failure blocks all downstream tasks (Airflow branch skips warehouse/marts)
+#   warning   → failure logs to staging.dq_results but pipeline continues
+#
+# check_type options (Phase 2 implementation):
+#   not_null          — column must have no NULL values
+#   unique            — column values must be distinct
+#   range             — numeric value between min and max (inclusive)
+#   accepted_values   — value must be in the provided list
+#   regex             — value must match the pattern
+#   referential       — value must exist in a reference column
+#   row_count         — table row count must be >= min_rows
+
+rules:
+
+  # ── Order ID integrity ──────────────────────────────────────────────────────
+  - name:       order_id_not_null
+    table:      stg_orders
+    column:     order_id
+    check_type: not_null
+    severity:   critical
+
+  - name:       order_id_positive
+    table:      stg_orders
+    column:     order_id
+    check_type: range
+    params:
+      min: 1
+      max: 9999999
+    severity:   critical
+
+  # ── Customer ID integrity ───────────────────────────────────────────────────
+  - name:       customer_id_not_null
+    table:      stg_orders
+    column:     order_customer_id
+    check_type: not_null
+    severity:   critical
+
+  - name:       customer_id_positive
+    table:      stg_orders
+    column:     order_customer_id
+    check_type: range
+    params:
+      min: 1
+      max: 9999999
+    severity:   critical
+
+  # ── Date validity ───────────────────────────────────────────────────────────
+  - name:       order_date_not_null
+    table:      stg_orders
+    column:     order_date
+    check_type: not_null
+    severity:   critical
+
+  - name:       shipping_date_after_order_date
+    table:      stg_orders
+    column:     shipping_date
+    check_type: custom
+    params:
+      expression: "shipping_date >= order_date OR shipping_date IS NULL"
+    severity:   warning
+
+  # ── Delivery metrics ────────────────────────────────────────────────────────
+  - name:       late_delivery_risk_valid_values
+    table:      stg_orders
+    column:     late_delivery_risk
+    check_type: accepted_values
+    params:
+      values: [0, 1]
+    severity:   critical
+
+  - name:       days_scheduled_positive
+    table:      stg_orders
+    column:     days_for_shipment_scheduled
+    check_type: range
+    params:
+      min: 0
+      max: 60
+    severity:   warning
+
+  # ── Financial metrics ───────────────────────────────────────────────────────
+  - name:       sales_not_null
+    table:      stg_orders
+    column:     sales_amount
+    check_type: not_null
+    severity:   warning
+
+  - name:       sales_non_negative
+    table:      stg_orders
+    column:     sales_amount
+    check_type: range
+    params:
+      min: 0
+      max: 999999
+    severity:   warning
+
+  - name:       order_item_quantity_positive
+    table:      stg_order_items
+    column:     order_item_quantity
+    check_type: range
+    params:
+      min: 1
+      max: 10000
+    severity:   warning
+
+  # ── Categorical integrity ───────────────────────────────────────────────────
+  - name:       shipping_mode_valid_values
+    table:      stg_orders
+    column:     shipping_mode
+    check_type: accepted_values
+    params:
+      values:
+        - "Standard Class"
+        - "First Class"
+        - "Second Class"
+        - "Same Day"
+    severity:   critical
+
+  - name:       customer_segment_valid_values
+    table:      stg_customers
+    column:     customer_segment
+    check_type: accepted_values
+    params:
+      values:
+        - "Consumer"
+        - "Corporate"
+        - "Home Office"
+    severity:   warning
+
+  - name:       delivery_status_valid_values
+    table:      stg_orders
+    column:     delivery_status
+    check_type: accepted_values
+    params:
+      values:
+        - "Advance shipping"
+        - "Late delivery"
+        - "Shipping canceled"
+        - "Shipping on time"
+    severity:   warning
+
+  # ── Row count thresholds ────────────────────────────────────────────────────
+  - name:       stg_orders_min_rows
+    table:      stg_orders
+    column:     null
+    check_type: row_count
+    params:
+      min_rows: 100
+    severity:   critical
+
+  - name:       stg_order_items_min_rows
+    table:      stg_order_items
+    column:     null
+    check_type: row_count
+    params:
+      min_rows: 100
+    severity:   critical
+
+  # ── Referential integrity (ETL-layer checks; no DDL FK on partitioned facts) ─
+  - name:       order_items_reference_valid_orders
+    table:      stg_order_items
+    column:     order_id
+    check_type: referential
+    params:
+      ref_table:  stg_orders
+      ref_column: order_id
+    severity:   critical

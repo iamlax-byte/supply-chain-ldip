@@ -1,0 +1,30 @@
+# ── Core data processing ─────────────────────────────────────────────────────
+pandas==2.1.4
+numpy==1.26.3
+
+# ── Database ─────────────────────────────────────────────────────────────────
+mysql-connector-python==8.2.0
+SQLAlchemy==2.0.25
+
+# ── Airflow (install separately via docker; listed here for local dev) ────────
+apache-airflow==2.9.1
+apache-airflow-providers-mysql==3.4.0
+
+# ── ML ────────────────────────────────────────────────────────────────────────
+scikit-learn==1.4.0
+joblib==1.3.2
+
+# ── Config & secrets ─────────────────────────────────────────────────────────
+PyYAML==6.0.1
+python-dotenv==1.0.0
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+python-json-logger==2.0.7
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest==7.4.4
+pytest-cov==4.1.0
+
+# ── Code quality ─────────────────────────────────────────────────────────────
+ruff==0.1.11
+black==23.12.1

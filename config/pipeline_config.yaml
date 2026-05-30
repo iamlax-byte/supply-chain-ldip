@@ -1,0 +1,36 @@
+# Pipeline runtime configuration.
+# Secrets (passwords, keys) come from .env — never put them here.
+
+database:
+  host:     "${MYSQL_HOST}"
+  port:     3306
+  user:     "${MYSQL_USER}"
+  password: "${MYSQL_PASSWORD}"
+
+raw_data:
+  filename: "DataCoSupplyChainDataset.csv"
+  path:     "data/raw/DataCoSupplyChainDataset.csv"
+  encoding: "iso-8859-1"   # DataCo CSV is Latin-1
+  chunk_size: 10000
+
+logging:
+  level:  "${LOG_LEVEL:-INFO}"
+  format: "json"           # structured JSON for Airflow log aggregation
+
+pipeline:
+  batch_id_prefix: "ldip"
+  env: "${PIPELINE_ENV:-development}"
+
+# Airflow SLA thresholds (minutes)
+sla:
+  raw_load:       30
+  staging:        45
+  warehouse:      60
+  marts:          30
+  total_dag:      180
+
+# Retry policy (applied per Airflow task)
+retry:
+  attempts:           3
+  delay_seconds:      30
+  backoff_multiplier: 2   # exponential: 30s → 60s → 120s

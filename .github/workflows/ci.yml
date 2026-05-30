@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint (ruff + black)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install linters
+        run: pip install ruff==0.1.11 black==23.12.1
+
+      - name: ruff check
+        run: ruff check src/ tests/ airflow/
+
+      - name: black format check
+        run: black --check --line-length 100 src/ tests/ airflow/
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            pandas==2.1.4 \
+            numpy==1.26.3 \
+            PyYAML==6.0.1 \
+            python-dotenv==1.0.0 \
+            scikit-learn==1.4.0 \
+            pytest==7.4.4 \
+            pytest-cov==4.1.0
+
+      - name: Run unit tests
+        env:
+          # Unit tests use mocks — no real DB needed
+          MYSQL_HOST: localhost
+          MYSQL_PORT: "3306"
+          MYSQL_USER: test
+          MYSQL_PASSWORD: test
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-fail-under=70 \
+            -v
+
+  dag-validation:
+    name: Airflow DAG validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Airflow + providers
+        run: |
+          pip install \
+            "apache-airflow==2.9.1" \
+            "apache-airflow-providers-mysql==3.4.0" \
+            --constraint \
+            "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.1/constraints-3.11.txt"
+
+      - name: Validate DAGs (import check)
+        env:
+          AIRFLOW__CORE__DAGS_FOLDER: airflow/dags
+          AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:///airflow.db
+          AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+          AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+        run: |
+          airflow db init
+          python -c "
+          import os, importlib, sys
+          from pathlib import Path
+
+          dag_dir = Path('airflow/dags')
+          dag_files = list(dag_dir.glob('*.py'))
+
+          if not dag_files:
+              print('No DAG files found — skipping validation.')
+              sys.exit(0)
+
+          errors = []
+          for f in dag_files:
+              try:
+                  spec = importlib.util.spec_from_file_location(f.stem, f)
+                  mod  = importlib.util.module_from_spec(spec)
+                  spec.loader.exec_module(mod)
+                  print(f'OK: {f.name}')
+              except Exception as e:
+                  errors.append((f.name, str(e)))
+                  print(f'FAIL: {f.name} — {e}')
+
+          if errors:
+              sys.exit(1)
+          "

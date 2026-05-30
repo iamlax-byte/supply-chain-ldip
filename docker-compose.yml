@@ -1,0 +1,167 @@
+---
+# Supply Chain LDIP — Docker Compose
+# Stack: MySQL 8 (data warehouse) + PostgreSQL (Airflow metadata) + Airflow 2.9 (LocalExecutor)
+#
+# First-time setup:
+#   1. cp .env.example .env && fill in passwords
+#   2. docker-compose build          # builds custom Airflow image with project deps
+#   3. docker-compose up airflow-init  # one-time DB migration + admin user creation
+#   4. docker-compose up -d          # start everything
+#   5. Open http://localhost:8080  (admin / admin)
+
+version: "3.8"
+
+# ── Shared Airflow config ─────────────────────────────────────────────────────
+x-airflow-common:
+  &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@ldip-airflow-db/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-change_me_32chars}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # Forward MySQL creds so DAG tasks can reach the warehouse
+    MYSQL_HOST: ldip-mysql
+    MYSQL_PORT: "3306"
+    MYSQL_USER: ${MYSQL_USER:-ldip_user}
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change_me}
+    PIPELINE_ENV: ${PIPELINE_ENV:-development}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # Make src/ importable inside the container
+    PYTHONPATH: /opt/airflow
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - airflow-logs:/opt/airflow/logs
+    - ./src:/opt/airflow/src
+    - ./data:/opt/airflow/data
+    - ./config:/opt/airflow/config
+    - ./sql:/opt/airflow/sql
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    ldip-airflow-db:
+      condition: service_healthy
+
+services:
+
+  # ── MySQL 8 (data warehouse: raw / staging / warehouse / marts / metadata) ───
+  ldip-mysql:
+    image: mysql:8.0
+    container_name: ldip-mysql
+    hostname: ldip-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change_me_root}
+      MYSQL_USER: ${MYSQL_USER:-ldip_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change_me}
+      # 'raw' is created by Docker; remaining schemas are created by DDL scripts
+      MYSQL_DATABASE: raw
+    ports:
+      - "3306:3306"
+    volumes:
+      - ldip-mysql-data:/var/lib/mysql
+      # DDL scripts execute alphabetically on first container start
+      - ./sql/ddl:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-change_me_root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+
+  # ── PostgreSQL (Airflow metadata store — separate from pipeline data) ─────────
+  ldip-airflow-db:
+    image: postgres:15
+    container_name: ldip-airflow-db
+    hostname: ldip-airflow-db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - ldip-airflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Airflow one-time init (DB migrate + admin user) ───────────────────────────
+  # Run with: docker-compose up airflow-init
+  # Exits 0 when complete; webserver/scheduler wait for it.
+  ldip-airflow-init:
+    <<: *airflow-common
+    container_name: ldip-airflow-init
+    user: "0:0"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname LDIP \
+          --lastname Admin \
+          --role Admin \
+          --email admin@ldip.local
+        echo "Airflow init complete."
+    environment:
+      <<: *airflow-common-env
+    restart: "no"
+
+  # ── Airflow webserver ─────────────────────────────────────────────────────────
+  ldip-airflow-webserver:
+    <<: *airflow-common
+    container_name: ldip-airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      ldip-airflow-init:
+        condition: service_completed_successfully
+      ldip-mysql:
+        condition: service_healthy
+
+  # ── Airflow scheduler ─────────────────────────────────────────────────────────
+  ldip-airflow-scheduler:
+    <<: *airflow-common
+    container_name: ldip-airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      ldip-airflow-init:
+        condition: service_completed_successfully
+      ldip-mysql:
+        condition: service_healthy
+
+volumes:
+  ldip-mysql-data:
+  ldip-airflow-db-data:
+  airflow-logs:
+
+networks:
+  default:
+    name: ldip-network
