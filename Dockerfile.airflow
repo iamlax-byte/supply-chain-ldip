@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 USER airflow
 COPY requirements.txt /opt/airflow/requirements.txt
 RUN pip install --no-cache-dir \
+    pandas==2.1.4 \
+    numpy==1.26.3 \
     mysql-connector-python==8.2.0 \
     SQLAlchemy==2.0.25 \
     python-dotenv==1.0.0 \

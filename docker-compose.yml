@@ -42,6 +42,7 @@ x-airflow-common:
     - ./data:/opt/airflow/data
     - ./config:/opt/airflow/config
     - ./sql:/opt/airflow/sql
+    - airflow-models:/opt/airflow/models
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -161,6 +162,7 @@ volumes:
   ldip-mysql-data:
   ldip-airflow-db-data:
   airflow-logs:
+  airflow-models:
 
 networks:
   default:
