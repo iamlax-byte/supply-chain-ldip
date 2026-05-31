@@ -71,7 +71,7 @@ select
     round(
         ps.units_sold
         / nullif(ct.category_units / nullif(
-            (select count(distinct product_key)
+            (select count(distinct dp2.product_key)
              from warehouse.fct_order_items foi2
              join warehouse.dim_product dp2 on dp2.product_key = foi2.product_key
              join warehouse.dim_date dd2    on dd2.date_key    = foi2.order_date_key

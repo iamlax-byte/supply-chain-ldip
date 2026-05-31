@@ -3,7 +3,7 @@
 -- Grain: one row per order (live orders + predicted risk)
 -- Audience: Operations / SLA Management
 --
--- Phase 3: Populates feature columns only; predicted_risk_score and
+-- Phase 3: Populates feature columns only — predicted_risk_score and
 --          predicted_is_late are NULL until the Phase 5 ML classifier runs.
 -- Phase 5: The ML task will UPDATE these rows with predictions after this
 --          INSERT, so the table always holds the latest feature + prediction state.
@@ -41,7 +41,7 @@ select
     fo.delivery_status,                     -- shipping_mode
     fo.order_region,
     dc.customer_segment,
-    dp.category_name                        as product_category,
+    any_value(dp.category_name)             as product_category,
     sum(foi.order_item_quantity)            as order_item_quantity,
     -- ML predictions (Phase 5)
     null                                    as predicted_risk_score,
@@ -68,5 +68,5 @@ group by
     fo.order_id, fo.order_key, fo.customer_key, fo.geography_key,
     fo.shipping_mode_key, fo.order_date_key,
     fo.days_for_shipment_scheduled, fo.delivery_status,
-    fo.order_region, dc.customer_segment, dp.category_name,
+    fo.order_region, dc.customer_segment,
     fo.is_late_flag, fo.delivery_delay_days;

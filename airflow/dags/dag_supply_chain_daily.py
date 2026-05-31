@@ -4,14 +4,17 @@ dag_supply_chain_daily
 Main production DAG for the Supply Chain LDIP pipeline.
 Runs daily at 06:00 UTC. Processes new CSV data end-to-end:
 
-  FileSensor → raw_load → dq_checks → branch_on_dq
+  FileSensor → raw_load → run_staging → dq_checks → branch_on_dq
       ├─ (critical failure) → skip_downstream → log_run
-      └─ (DQ passed)  → run_staging → load_warehouse → load_marts → log_run
+      └─ (DQ passed)  → load_warehouse → load_marts → log_run
 
 Key design decisions:
-  - XComs carry batch_id between tasks — no shared global state.
+  - Staging runs BEFORE DQ so that DQ validates clean, typed data in
+    staging tables rather than raw VARCHAR strings. This is more meaningful
+    and matches how all DQ rules in dq_rules.yaml are written (against stg_*).
   - BranchPythonOperator skips warehouse/marts on critical DQ failure so
     bad data never pollutes the gold layer.
+  - XComs carry batch_id between tasks — no shared global state.
   - trigger_rule=ALL_DONE on log_run ensures metadata is always written,
     even after failures.
   - Exponential backoff retries: 30s → 60s → 120s (3 attempts total).
@@ -54,30 +57,73 @@ _DEFAULT_ARGS = {
 
 # ── Task callables ────────────────────────────────────────────────────────────
 
+def _get_existing_batch_id(csv_name: str) -> tuple[str, int]:
+    """Query raw.load_log for the most recent SUCCESS batch_id for this file.
+
+    Returns (batch_id, rows_loaded). Called when the CSV is already loaded so
+    downstream tasks can still receive a valid batch_id via XCom.
+    """
+    from src.utils.db import get_engine
+    from sqlalchemy import text as sa_text
+
+    engine = get_engine("raw")
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa_text(
+                "select batch_id, rows_loaded from `raw`.load_log "
+                "where source_file = :f and status = 'SUCCESS' "
+                "order by start_ts desc limit 1"
+            ),
+            {"f": csv_name},
+        ).fetchone()
+    if row is None:
+        raise RuntimeError(f"No SUCCESS batch found in load_log for {csv_name}")
+    return row[0], row[1]
+
+
 def _load_raw(**context) -> str:
-    """Load DataCo CSV into raw.orders and push batch_id to XCom."""
+    """Load DataCo CSV into raw.orders and push batch_id to XCom.
+
+    Idempotent: if the CSV was already loaded in a previous run, recovers
+    the existing batch_id from raw.load_log rather than failing.  This lets
+    the pipeline re-run the transformation layers (staging → warehouse → marts)
+    without re-ingesting raw data.
+    """
     from src.ingestion.load_raw import load_raw_orders
     from src.utils.pipeline_logger import log_task_run
+    from pathlib import Path
 
-    start = datetime.now(timezone.utc)
+    start    = datetime.now(timezone.utc)
+    csv_name = Path(CSV_PATH).name
+
     try:
-        result  = load_raw_orders(CSV_PATH, force=False)
+        result   = load_raw_orders(CSV_PATH, force=False)
         batch_id = result["batch_id"]
-        status  = "success"
+        rows     = result["rows_loaded"]
+        status   = "success"
+        log.info("Raw load complete | batch_id=%s | rows=%d", batch_id, rows)
+
     except RuntimeError as exc:
-        # File already loaded — extract existing batch_id from error if present
-        # or re-raise to fail the task and let Airflow retry
-        log.warning("load_raw raised RuntimeError: %s", exc)
-        raise
+        if "already has a SUCCESS record" in str(exc):
+            # CSV loaded in a prior run — recover existing batch_id so downstream
+            # tasks (DQ → staging → warehouse → marts) still have context.
+            log.info("CSV already loaded. Recovering batch_id from load_log.")
+            batch_id, rows = _get_existing_batch_id(csv_name)
+            status = "already_loaded"
+            log.info("Recovered batch_id=%s | rows=%d", batch_id, rows)
+        else:
+            # Genuine error — let Airflow retry
+            log.error("load_raw raised unexpected RuntimeError: %s", exc)
+            raise
 
     context["ti"].xcom_push(key="batch_id",    value=batch_id)
-    context["ti"].xcom_push(key="rows_loaded", value=result["rows_loaded"])
+    context["ti"].xcom_push(key="rows_loaded", value=rows)
 
     log_task_run(
         dag_id=DAG_ID, task_id="load_raw",
         execution_date=context["ds"],
         batch_id=batch_id, start_ts=start, end_ts=datetime.now(timezone.utc),
-        status=status, rows_written=result["rows_loaded"],
+        status=status, rows_written=rows,
         airflow_run_id=context["run_id"],
     )
     return batch_id
@@ -117,8 +163,9 @@ def _run_dq_checks(**context) -> None:
 def _branch_on_dq(**context) -> str:
     """Return downstream task_id based on DQ result.
 
-    Critical failures route to the skip task — no warehouse/mart writes.
-    This keeps bad data out of the gold layer until DQ is resolved.
+    Staging has already run at this point. DQ validated the cleaned staging
+    tables. Critical failures route to the skip task so bad data never reaches
+    the warehouse or mart layers (gold layer protection).
     """
     has_failures = context["ti"].xcom_pull(
         task_ids="run_dq_checks", key="has_critical_failures"
@@ -126,7 +173,7 @@ def _branch_on_dq(**context) -> str:
     if has_failures:
         log.warning("Critical DQ failures detected — skipping warehouse/marts.")
         return "skip_on_critical_dq_failure"
-    return "run_staging"
+    return "load_warehouse"
 
 
 def _run_staging(**context) -> None:
@@ -196,7 +243,10 @@ def _load_marts(**context) -> None:
         "mart_inventory_velocity.sql",
         "mart_late_delivery_risk.sql",
     ]
-    sql_dir = Path("/opt/airflow/sql/marts")
+    # sql_baked is a copy of sql/marts baked into the container at build time
+    # (or manually copied via docker cp) to avoid OSError 35 (VirtioFS deadlock)
+    # that occurs when Python reads files from Mac bind-mounted volumes.
+    sql_dir = Path("/opt/airflow/sql_baked/marts")
     engine  = get_engine("marts")
     total_rows = 0
 
@@ -261,6 +311,7 @@ with DAG(
     schedule_interval="0 6 * * *",          # 06:00 UTC daily
     start_date=datetime(2024, 1, 1),
     catchup=False,
+    max_active_runs=1,                       # prevent concurrent runs on same data
     default_args=_DEFAULT_ARGS,
     tags=["supply-chain", "daily", "ldip"],
     doc_md=__doc__,
@@ -343,7 +394,9 @@ with DAG(
     )
 
     # ── Dependency graph ──────────────────────────────────────────────────────
-    wait_for_file >> load_raw_task >> dq_task >> branch_task
-    branch_task   >> [skip_task, staging_task]
-    staging_task  >> warehouse_task >> marts_task >> log_task
-    skip_task     >> log_task
+    # Staging runs first so DQ validates clean, typed data — not raw VARCHARs.
+    # DQ gates the gold layer: critical failures skip warehouse + marts entirely.
+    wait_for_file >> load_raw_task >> staging_task >> dq_task >> branch_task
+    branch_task   >> [skip_task, warehouse_task]
+    warehouse_task >> marts_task >> log_task
+    skip_task      >> log_task

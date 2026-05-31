@@ -9,13 +9,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 USER airflow
 COPY requirements.txt /opt/airflow/requirements.txt
+# Copy src/ into the image so Python imports don't go through the Mac bind mount.
+# The bind mount in docker-compose overlays this at runtime for DAGs (hot-reload),
+# but src/ is a library — baking it in avoids the OSError 35 (filesystem deadlock)
+# that Docker Desktop for Mac causes when Python reads .py files from VirtioFS mounts.
+COPY --chown=airflow:root src/ /opt/airflow/src/
+COPY --chown=airflow:root config/ /opt/airflow/config/
+# Bake sql/ into the image so tasks read SQL from the container's native
+# filesystem instead of the Mac VirtioFS bind mount (avoids OSError 35).
+COPY --chown=airflow:root sql/ /opt/airflow/sql_baked/
 RUN pip install --no-cache-dir \
     pandas==2.1.4 \
     numpy==1.26.3 \
     mysql-connector-python==8.2.0 \
-    SQLAlchemy==2.0.25 \
     python-dotenv==1.0.0 \
     python-json-logger==2.0.7 \
     scikit-learn==1.4.0 \
     joblib==1.3.2 \
     PyYAML==6.0.1
+# SQLAlchemy is intentionally NOT pinned here — Airflow 2.9.1 requires 1.4.x
+# and ships with a constrained version. Overriding it with 2.x breaks Airflow.

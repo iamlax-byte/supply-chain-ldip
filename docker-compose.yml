@@ -35,14 +35,15 @@ x-airflow-common:
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
     # Make src/ importable inside the container
     PYTHONPATH: /opt/airflow
+    PYTHONDONTWRITEBYTECODE: "1"   # prevent __pycache__ writes on Mac bind mounts (errno 35)
   volumes:
-    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/dags:/opt/airflow/dags   # bind mount for hot-reload
     - airflow-logs:/opt/airflow/logs
-    - ./src:/opt/airflow/src
     - ./data:/opt/airflow/data
-    - ./config:/opt/airflow/config
     - ./sql:/opt/airflow/sql
     - airflow-models:/opt/airflow/models
+    # src/ and config/ are baked into the image (see Dockerfile.airflow)
+    # to avoid OSError 35 (VirtioFS filesystem deadlock) on Docker Desktop for Mac
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -63,7 +64,7 @@ services:
       # 'raw' is created by Docker; remaining schemas are created by DDL scripts
       MYSQL_DATABASE: raw
     ports:
-      - "3306:3306"
+      - "3307:3306"   # 3306 is taken by local MySQL; use 3307 from host
     volumes:
       - ldip-mysql-data:/var/lib/mysql
       # DDL scripts execute alphabetically on first container start

@@ -42,6 +42,8 @@ def get_engine(schema: str = "raw") -> Engine:
         pool_pre_ping=True,
         pool_recycle=3600,
         echo=False,
+        future=True,   # SQLAlchemy 2.0-style API — enables conn.commit()/rollback()
+                       # Required when running under Airflow 2.9 which pins SQLAlchemy 1.4
     )
 
 
